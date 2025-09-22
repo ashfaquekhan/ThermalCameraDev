@@ -1,0 +1,85 @@
+pi@chicken:~/ThermalCameraDriver/simple_thermal $ sudo ./simple_thermal
+🌡️ P2 Thermal Camera Application (Working Lean)
+===============================================
+Based on working diagnostic code
+✅ Command system initialized
+📷 Initializing UVC camera...
+🔍 Scanning for thermal cameras...
+Device 0: VID=0xbda, PID=0x5840
+✅ Found P2 thermal camera at index 0
+📐 Camera configuration:
+   Resolution: 256x192
+   FPS: 25
+   Format: YUY2
+📷 Opening camera...
+📦 Creating frame buffer...
+🎬 Starting camera stream...
+✅ Camera streaming started successfully
+🔧 Configuring P2 camera parameters...
+⚠️  Failed to set emissivity: -1
+⚠️  Failed to set ambient temperature: -1
+⚠️  Failed to set gain mode: -16
+🌡️ Attempting to switch to Y16 temperature mode...
+   Waiting 3 seconds for camera stabilization...
+✅ Successfully switched to Y16 temperature mode
+🖥️  Creating OpenCV display window...
+QStandardPaths: XDG_RUNTIME_DIR not set, defaulting to '/tmp/runtime-root'
+✅ OpenCV window created successfully
+🚀 Starting main processing loop...
+
+📋 CONTROLS: 'q' to quit, 't' to toggle temperature mode
+Click on the image to select measurement points
+
+📊 146/146 frames | 14s | 12.5 fps | Y16 mode        🎯 Selected: (225,55)
+📊 171/171 frames | 16s | 12.5 fps | Y16 mode        🎯 Selected: (224,59)
+🎯 Selected: (220,74)
+📊 183/183 frames | 17s | 11.5 fps | Y16 mode        🎯 Selected: (216,48)
+📊 196/196 frames | 18s | 12.6 fps | Y16 mode        🎯 Selected: (220,60)
+📊 221/221 frames | 20s | 11.5 fps | Y16 mode        
+📷 Switched to RGB mode
+📊 830/830 frames | 25s | 83.2 fps | YUY2 mode        🌡️ Attempting to switch to Y16 temperature mode...
+   Waiting 3 seconds for camera stabilization...
+✅ Successfully switched to Y16 temperature mode
+
+🌡️ Successfully switched to temperature mode
+📊 1026/1026 frames | 47s | 6.3 fps | Y16 mode        🎯 Selected: (86,61)
+📊 1039/1039 frames | 48s | 12.4 fps | Y16 mode        🎯 Selected: (94,55)
+📊 1051/1051 frames | 49s | 11.6 fps | Y16 mode        🎯 Selected: (95,46)
+📊 1064/1064 frames | 50s | 12.4 fps | Y16 mode        🎯 Selected: (99,45)
+📊 1077/1077 frames | 51s | 12.6 fps | Y16 mode        🎯 Selected: (121,77)
+🎯 Selected: (120,77)
+🎯 Selected: (119,76)
+📊 1089/1089 frames | 52s | 11.5 fps | Y16 mode        🎯 Selected: (143,70)
+📊 1102/1102 frames | 53s | 12.5 fps | Y16 mode        🎯 Selected: (91,63)
+📊 1208/1208 frames | 63s | 11.5 fps | Y16 mode        🎯 Selected: (149,58)
+📊 1374/1374 frames | 79s | 5.0 fps | Y16 mode        🎯 Selected: (72,109)
+📊 1386/1386 frames | 80s | 11.4 fps | Y16 mode        🎯 Selected: (52,106)
+📊 1399/1399 frames | 81s | 12.5 fps | Y16 mode        🎯 Selected: (63,112)
+🎯 Selected: (65,92)
+📊 1411/1411 frames | 82s | 11.6 fps | Y16 mode        🎯 Selected: (63,116)
+📊 1424/1424 frames | 83s | 12.5 fps | Y16 mode        🎯 Selected: (67,98)
+📊 1472/1472 frames | 87s | 11.5 fps | Y16 mode        🎯 Selected: (56,103)
+🎯 Selected: (54,100)
+📊 1485/1485 frames | 89s | 12.6 fps | Y16 mode        🎯 Selected: (51,93)
+🎯 Selected: (51,93)
+📊 1510/1510 frames | 91s | 11.5 fps | Y16 mode        🎯 Selected: (64,144)
+📊 1523/1523 frames | 92s | 12.6 fps | Y16 mode        🎯 Selected: (177,156)
+📊 1560/1560 frames | 95s | 11.5 fps | Y16 mode        🎯 Selected: (114,141)
+📊 1573/1573 frames | 97s | 12.5 fps | Y16 mode        🎯 Selected: (201,159)
+📊 1586/1586 frames | 98s | 12.5 fps | Y16 mode        🎯 Selected: (173,160)
+📊 1619/1619 frames | 101s | 12.6 fps | Y16 mode        🎯 Selected: (194,76)
+📊 1631/1631 frames | 102s | 11.5 fps | Y16 mode        🎯 Selected: (197,70)
+📊 1654/1654 frames | 105s | 6.3 fps | Y16 mode        🎯 Selected: (191,112)
+📊 1667/1667 frames | 106s | 12.5 fps | Y16 mode        🎯 Selected: (192,116)
+📊 1731/1731 frames | 111s | 12.5 fps | Y16 mode        
+👋 User requested exit
+
+
+🧹 Starting cleanup...
+
+📊 SESSION SUMMARY
+Total frames attempted: 1742
+Successful frames: 1742
+Success rate: 100.0%
+Total time: 112 seconds
+Average FPS: 15.6

@@ -1,0 +1,777 @@
+// Diagnostic version with enhanced error checking and fixes
+#include <iostream>
+#include <cstring>
+#include <unistd.h>
+#include <signal.h>
+#include <iomanip>
+#include <sstream>
+#include <chrono>
+#include <fstream>
+#include <vector>
+#include <thread>
+#include <mutex>
+#include <condition_variable>
+#include <algorithm>
+#include <numeric>
+#include <cmath>
+
+// Platform-specific includes
+#if defined(_WIN32)
+    #include <Windows.h>
+    #define  _CRT_SECURE_NO_WARNINGS
+#elif defined(linux) || defined(unix)
+    #include <unistd.h>
+    #include <sys/time.h>    
+    #include <sys/resource.h>
+    #include <semaphore.h>
+#endif
+
+// CRITICAL: Define DLLEXPORT before ANY SDK headers
+#ifndef DLLEXPORT
+    #if defined(_WIN32)
+        #define DLLEXPORT __declspec(dllexport)
+    #elif defined(linux) || defined(unix) || defined(__linux__) || defined(__unix__)
+        #define DLLEXPORT
+    #else
+        #define DLLEXPORT
+    #endif
+#endif
+
+// Include SDK headers in correct order
+extern "C" {
+    #include "all_config.h"     // Must be first
+    #include "libiruvc.h"       // UVC camera functions
+    #include "libirparse.h"     // Data format conversion
+    #include "libirprocess.h"   // Image processing
+    #include "libirtemp.h"      // Temperature measurement
+    #include "thermal_cam_cmd.h" // Command interface
+}
+
+// OpenCV for real-time display
+#include <opencv2/opencv.hpp>
+#include <opencv2/imgproc.hpp>
+#include <opencv2/highgui.hpp>
+
+// ==================================================
+// DIAGNOSTIC MACROS
+// ==================================================
+
+#define DEBUG_PRINT(x) std::cout << "🔍 DEBUG: " << x << std::endl
+#define ERROR_PRINT(x) std::cerr << "❌ ERROR: " << x << std::endl
+#define WARNING_PRINT(x) std::cout << "⚠️  WARNING: " << x << std::endl
+
+// ==================================================
+// CONFIGURATION STRUCTURES (SIMPLIFIED)
+// ==================================================
+
+struct ThermalConfig {
+    bool show_thermal_mode = true;
+    bool show_crosshair = true;
+    bool show_stats = true;
+    int display_scale = 2;
+    float temp_offset_celsius = 0.0f;
+    bool is_temperature_mode = false;
+    bool enable_frame_limit = false;
+    int max_frames = 0;
+    int max_seconds = 0;
+};
+
+enum TemperatureUnit {
+    UNIT_CELSIUS = 0,
+    UNIT_FAHRENHEIT = 1,
+    UNIT_KELVIN = 2
+};
+
+struct FrameStats {
+    float min_temp_c = -999.0f;
+    float max_temp_c = -999.0f;
+    float avg_temp_c = -999.0f;
+    bool valid = false;
+};
+
+// Global state
+static ThermalConfig g_config;
+static bool g_running = true;
+static cv::Point g_selected_point(128, 96);
+static TemperatureUnit g_display_unit = UNIT_CELSIUS;
+static TempDataRes_t g_temp_res = {256, 192};
+
+// Global variables required by SDK
+uint8_t is_streaming = 0;
+int stream_time = 1000;
+int fps = 25;
+
+// ==================================================
+// UTILITY FUNCTIONS
+// ==================================================
+
+void check_display_environment() {
+    DEBUG_PRINT("Checking display environment...");
+    
+    const char* display = getenv("DISPLAY");
+    if (!display) {
+        WARNING_PRINT("DISPLAY environment variable not set");
+        std::cout << "  If running over SSH, use: ssh -X username@hostname" << std::endl;
+    } else {
+        DEBUG_PRINT("DISPLAY = " << display);
+    }
+    
+    // Test OpenCV window creation
+    try {
+        cv::Mat test_img = cv::Mat::zeros(100, 100, CV_8UC3);
+        cv::namedWindow("Test Window", cv::WINDOW_AUTOSIZE);
+        cv::imshow("Test Window", test_img);
+        cv::waitKey(1);
+        cv::destroyWindow("Test Window");
+        DEBUG_PRINT("OpenCV window creation test: SUCCESS");
+    } catch (const cv::Exception& e) {
+        ERROR_PRINT("OpenCV window creation test FAILED: " << e.what());
+        std::cout << "  Try running: export DISPLAY=:0.0" << std::endl;
+    }
+}
+
+const char* get_unit_symbol() {
+    switch (g_display_unit) {
+        case UNIT_CELSIUS: return "°C";
+        case UNIT_FAHRENHEIT: return "°F";
+        case UNIT_KELVIN: return "K";
+        default: return "°C";
+    }
+}
+
+float convert_to_display_unit(float celsius) {
+    switch (g_display_unit) {
+        case UNIT_CELSIUS: return celsius;
+        case UNIT_FAHRENHEIT: return (celsius * 9.0f / 5.0f) + 32.0f;
+        case UNIT_KELVIN: return celsius + 273.15f;
+        default: return celsius;
+    }
+}
+
+// ==================================================
+// ENHANCED TEMPERATURE FUNCTIONS
+// ==================================================
+
+float get_point_temperature_safe(uint16_t* temp_data, int x, int y, int width, int height) {
+    if (!temp_data || x < 0 || x >= width || y < 0 || y >= height) {
+        return -999.0f;
+    }
+    
+    // Method 1: Try SDK point temperature function
+    IruvcPoint_t point = {(uint16_t)x, (uint16_t)y};
+    uint16_t temp_raw = 0;
+    
+    if (tpd_get_point_temp_info(point, &temp_raw) == 0) {
+        double temp_kelvin = (double)temp_raw / 16.0;
+        double temp_celsius = temp_kelvin - 273.15;
+        return (float)(temp_celsius + g_config.temp_offset_celsius);
+    }
+    
+    // Method 2: Direct pixel conversion as fallback
+    uint16_t raw_pixel = temp_data[y * width + x];
+    float temp_celsius = ((float)raw_pixel / 64.0f) - 273.15f;
+    return temp_celsius + g_config.temp_offset_celsius;
+}
+
+FrameStats calculate_frame_stats_safe(uint16_t* temp_data, int width, int height) {
+    FrameStats stats;
+    
+    if (!temp_data || width <= 0 || height <= 0) {
+        return stats;
+    }
+    
+    // Try SDK max/min function first
+    MaxMinTempInfo_t max_min_info;
+    if (tpd_get_max_min_temp_info(&max_min_info) == 0) {
+        double min_kelvin = (double)max_min_info.min_temp / 16.0;
+        double max_kelvin = (double)max_min_info.max_temp / 16.0;
+        
+        stats.min_temp_c = (min_kelvin - 273.15) + g_config.temp_offset_celsius;
+        stats.max_temp_c = (max_kelvin - 273.15) + g_config.temp_offset_celsius;
+        
+        // Simple average calculation
+        stats.avg_temp_c = (stats.min_temp_c + stats.max_temp_c) / 2.0f;
+        stats.valid = true;
+        
+        DEBUG_PRINT("Frame stats via SDK: Min=" << stats.min_temp_c << "°C, Max=" << stats.max_temp_c << "°C");
+    } else {
+        DEBUG_PRINT("SDK frame stats not available, using manual calculation");
+        
+        // Manual calculation as fallback
+        std::vector<float> temps;
+        temps.reserve(100);
+        
+        // Sample every 8th pixel for performance
+        for (int y = 4; y < height; y += 8) {
+            for (int x = 4; x < width; x += 8) {
+                float temp = get_point_temperature_safe(temp_data, x, y, width, height);
+                if (temp > -900) {
+                    temps.push_back(temp);
+                }
+            }
+        }
+        
+        if (!temps.empty()) {
+            auto minmax = std::minmax_element(temps.begin(), temps.end());
+            stats.min_temp_c = *minmax.first;
+            stats.max_temp_c = *minmax.second;
+            stats.avg_temp_c = std::accumulate(temps.begin(), temps.end(), 0.0f) / temps.size();
+            stats.valid = true;
+        }
+    }
+    
+    return stats;
+}
+
+// ==================================================
+// CAMERA CONFIGURATION WITH DIAGNOSTICS
+// ==================================================
+
+bool configure_camera_with_diagnostics() {
+    DEBUG_PRINT("Configuring P2 camera parameters with diagnostics...");
+    
+    // Wait a bit for camera to be ready
+    usleep(500000); // 500ms
+    
+    // Try to set emissivity (value should be in range 1-16384 for 0.01-1.0)
+    uint16_t emissivity_value = (uint16_t)(0.95 * (1 << 14)); // 0.95 emissivity
+    int result = set_prop_tpd_params(TPD_PROP_EMS, emissivity_value);
+    if (result == 0) {
+        DEBUG_PRINT("Emissivity set successfully: " << emissivity_value);
+    } else {
+        WARNING_PRINT("Failed to set emissivity: " << result);
+    }
+    
+    // Try to set ambient temperature (in 1/16 Kelvin units)
+    uint16_t ambient_temp = (uint16_t)((27.0 + 273.15) * 16); // 27°C in 1/16 K
+    result = set_prop_tpd_params(TPD_PROP_TA, ambient_temp);
+    if (result == 0) {
+        DEBUG_PRINT("Ambient temperature set successfully: " << ambient_temp);
+    } else {
+        WARNING_PRINT("Failed to set ambient temperature: " << result);
+    }
+    
+    // Try to set gain mode
+    result = set_prop_tpd_params(TPD_PROP_GAIN_SEL, 1); // High gain
+    if (result == 0) {
+        DEBUG_PRINT("Gain mode set to HIGH successfully");
+    } else {
+        WARNING_PRINT("Failed to set gain mode: " << result);
+    }
+    
+    return true;
+}
+
+bool switch_to_temperature_mode_safe() {
+    DEBUG_PRINT("Attempting to switch to Y16 temperature mode...");
+    
+    // Wait for camera stabilization
+    DEBUG_PRINT("Waiting 3 seconds for camera stabilization...");
+    sleep(3);
+    
+    // Try to switch to Y16 mode
+    int result = y16_preview_start(PREVIEW_PATH0, Y16_MODE_TEMPERATURE);
+    if (result == 0) {
+        DEBUG_PRINT("Successfully switched to Y16 temperature mode");
+        g_config.is_temperature_mode = true;
+        
+        // Wait a bit more after mode switch
+        usleep(1000000); // 1 second
+        
+        return true;
+    } else {
+        ERROR_PRINT("Failed to switch to Y16 temperature mode. Error code: " << result);
+        DEBUG_PRINT("Continuing in YUY2 mode - temperature data may not be accurate");
+        return false;
+    }
+}
+
+// ==================================================
+// SIGNAL HANDLER
+// ==================================================
+
+void signal_handler(int signum) {
+    std::cout << "\n🛑 Signal received, shutting down gracefully..." << std::endl;
+    g_running = false;
+    is_streaming = 0;
+}
+
+// ==================================================
+// MOUSE CALLBACK
+// ==================================================
+
+void mouse_callback(int event, int x, int y, int flags, void* userdata) {
+    if (event == cv::EVENT_LBUTTONDOWN) {
+        int* scale = (int*)userdata;
+        int thermal_x = x / (*scale);
+        int thermal_y = y / (*scale);
+        
+        if (thermal_x >= 0 && thermal_x < g_temp_res.width && 
+            thermal_y >= 0 && thermal_y < g_temp_res.height) {
+            g_selected_point = cv::Point(thermal_x, thermal_y);
+            DEBUG_PRINT("Selected point: (" << thermal_x << "," << thermal_y << ")");
+        }
+    }
+}
+
+// ==================================================
+// MAIN PROGRAM
+// ==================================================
+
+int main(int argc, char* argv[]) {
+    // Parse command line arguments
+    for (int i = 1; i < argc; i++) {
+        std::string arg = argv[i];
+        if (arg == "--max-frames" && i + 1 < argc) {
+            g_config.enable_frame_limit = true;
+            g_config.max_frames = std::atoi(argv[++i]);
+        } else if (arg == "--max-seconds" && i + 1 < argc) {
+            g_config.enable_frame_limit = true;
+            g_config.max_seconds = std::atoi(argv[++i]);
+        } else if (arg == "--debug") {
+            DEBUG_PRINT("Debug mode enabled");
+        } else if (arg == "--help") {
+            std::cout << "Usage: " << argv[0] << " [options]" << std::endl;
+            std::cout << "Options:" << std::endl;
+            std::cout << "  --max-frames N    Stop after N frames" << std::endl;
+            std::cout << "  --max-seconds N   Stop after N seconds" << std::endl;
+            std::cout << "  --debug          Enable debug output" << std::endl;
+            return 0;
+        }
+    }
+    
+    // Setup signal handlers
+    signal(SIGINT, signal_handler);
+    signal(SIGTERM, signal_handler);
+    
+    std::cout << "🌡️ P2 Thermal Camera Application (Diagnostic Mode)" << std::endl;
+    std::cout << "==================================================" << std::endl;
+    std::cout << "Version 5.2 - Diagnostic" << std::endl;
+    
+    // Check display environment first
+    check_display_environment();
+    
+    // Initialize camera system
+    DEBUG_PRINT("Initializing camera system...");
+    
+    // Try to load tau files (optional)
+    std::ifstream tau_file("tau_H.bin", std::ios::binary);
+    if (tau_file.good()) {
+        tau_file.close();
+        DEBUG_PRINT("Found tau_H.bin calibration file");
+    } else {
+        DEBUG_PRINT("No tau_H.bin found (optional)");
+    }
+    
+    // Initialize command system
+    if (vdcmd_init() == 0) {
+        DEBUG_PRINT("Command system initialized successfully");
+    } else {
+        WARNING_PRINT("Command system initialization failed");
+    }
+    
+    // Initialize UVC camera
+    DEBUG_PRINT("Initializing UVC camera...");
+    int result = uvc_camera_init();
+    if (result < 0) {
+        ERROR_PRINT("UVC camera initialization failed: " << result);
+        return -1;
+    }
+    
+    // Scan for devices
+    DevCfg_t devices[64];
+    memset(devices, 0, sizeof(devices));
+    
+    result = uvc_camera_list(devices);
+    if (result < 0) {
+        ERROR_PRINT("Device scan failed: " << result);
+        uvc_camera_release();
+        return -1;
+    }
+    
+    DEBUG_PRINT("Scanning for thermal cameras...");
+    
+    // Find P2 thermal camera
+    int thermal_index = -1;
+    for (int i = 0; i < 10 && devices[i].vid != 0; i++) {
+        DEBUG_PRINT("Device " << i << ": VID=0x" << std::hex << devices[i].vid << ", PID=0x" << devices[i].pid << std::dec);
+        
+        if (devices[i].vid == 0x0BDA && devices[i].pid == 0x5840) {
+            thermal_index = i;
+            DEBUG_PRINT("Found P2 thermal camera at index " << i);
+            break;
+        }
+    }
+    
+    if (thermal_index < 0) {
+        ERROR_PRINT("No P2 thermal camera found (VID=0x0BDA, PID=0x5840)");
+        uvc_camera_release();
+        return -1;
+    }
+    
+    // Get camera stream information
+    CameraStreamInfo_t streams[32];
+    memset(streams, 0, sizeof(streams));
+    
+    result = uvc_camera_info_get(devices[thermal_index], streams);
+    if (result < 0) {
+        ERROR_PRINT("Failed to get camera info: " << result);
+        uvc_camera_release();
+        return -1;
+    }
+    
+    // Setup camera parameters
+    CameraParam_t camera_param;
+    memset(&camera_param, 0, sizeof(camera_param));
+    
+    camera_param.dev_cfg = devices[thermal_index];
+    camera_param.format = streams[0].format;
+    camera_param.width = streams[0].width;
+    camera_param.height = streams[0].height;
+    camera_param.frame_size = camera_param.width * camera_param.height * 2;
+    camera_param.fps = streams[0].fps[0];
+    camera_param.timeout_ms_delay = 1000; // Increased timeout
+    
+    fps = camera_param.fps;
+    
+    DEBUG_PRINT("Camera configuration:");
+    DEBUG_PRINT("  Resolution: " << camera_param.width << "x" << camera_param.height);
+    DEBUG_PRINT("  FPS: " << camera_param.fps);
+    DEBUG_PRINT("  Format: " << camera_param.format);
+    DEBUG_PRINT("  Frame size: " << camera_param.frame_size);
+    
+    // Set thermal data dimensions
+    int thermal_width = camera_param.width;
+    int thermal_height = camera_param.height;
+    g_temp_res.width = thermal_width;
+    g_temp_res.height = thermal_height;
+    
+    // Open camera
+    DEBUG_PRINT("Opening camera...");
+    result = uvc_camera_open(devices[thermal_index]);
+    if (result < 0) {
+        ERROR_PRINT("Failed to open camera: " << result);
+        uvc_camera_release();
+        return -1;
+    }
+    
+    // Create frame buffer
+    DEBUG_PRINT("Creating frame buffer...");
+    void* frame_buffer = uvc_frame_buf_create(camera_param);
+    if (!frame_buffer) {
+        ERROR_PRINT("Failed to create frame buffer");
+        uvc_camera_close();
+        uvc_camera_release();
+        return -1;
+    }
+    
+    // Start streaming
+    DEBUG_PRINT("Starting camera stream...");
+    result = uvc_camera_stream_start(camera_param, nullptr);
+    if (result < 0) {
+        ERROR_PRINT("Failed to start streaming: " << result);
+        uvc_frame_buf_release(frame_buffer);
+        uvc_camera_close();
+        uvc_camera_release();
+        return -1;
+    }
+    
+    is_streaming = 1;
+    DEBUG_PRINT("Camera streaming started successfully");
+    
+    // Configure camera parameters
+    configure_camera_with_diagnostics();
+    
+    // Try to switch to temperature mode
+    if (!switch_to_temperature_mode_safe()) {
+        WARNING_PRINT("Continuing in RGB mode - temperature readings may be inaccurate");
+    }
+    
+    // Allocate processing buffers
+    uint16_t* temp_data = new uint16_t[thermal_width * thermal_height];
+    uint8_t* rgb_display = new uint8_t[thermal_width * thermal_height * 3];
+    
+    DEBUG_PRINT("Creating OpenCV display window...");
+    
+    try {
+        cv::namedWindow("P2 Thermal Camera - Diagnostic", cv::WINDOW_AUTOSIZE);
+        cv::setMouseCallback("P2 Thermal Camera - Diagnostic", mouse_callback, &g_config.display_scale);
+        DEBUG_PRINT("OpenCV window created successfully");
+    } catch (const cv::Exception& e) {
+        ERROR_PRINT("Failed to create OpenCV window: " << e.what());
+        std::cout << "Continuing without display..." << std::endl;
+    }
+    
+    // Frame processing variables
+    int frame_count = 0;
+    int successful_frames = 0;
+    auto start_time = std::chrono::steady_clock::now();
+    auto last_fps_time = start_time;
+    int fps_counter = 0;
+    float current_fps = 0;
+    FrameStats current_stats;
+    
+    DEBUG_PRINT("Starting main processing loop...");
+    std::cout << "\n📋 CONTROLS: 'q' to quit, 'h' for help, 't' to toggle temperature mode" << std::endl;
+    std::cout << "Click on the image to select measurement points\n" << std::endl;
+    
+    // Main processing loop
+    while (g_running && is_streaming) {
+        // Check frame/time limits
+        if (g_config.enable_frame_limit) {
+            auto elapsed = std::chrono::steady_clock::now() - start_time;
+            auto elapsed_seconds = std::chrono::duration_cast<std::chrono::seconds>(elapsed).count();
+            
+            if (g_config.max_frames > 0 && frame_count >= g_config.max_frames) {
+                DEBUG_PRINT("Frame limit reached");
+                break;
+            }
+            
+            if (g_config.max_seconds > 0 && elapsed_seconds >= g_config.max_seconds) {
+                DEBUG_PRINT("Time limit reached");
+                break;
+            }
+        }
+        
+        // Get frame from camera
+        result = uvc_frame_get(frame_buffer);
+        if (result != 0) {
+            if (frame_count % 100 == 0) { // Only print every 100 failures to avoid spam
+                DEBUG_PRINT("Frame get failed: " << result << " (frame " << frame_count << ")");
+            }
+            usleep(10000); // 10ms delay
+            frame_count++;
+            continue;
+        }
+        
+        frame_count++;
+        successful_frames++;
+        fps_counter++;
+        
+        // Extract data from frame
+        uint8_t* raw_data = (uint8_t*)frame_buffer;
+        
+        if (g_config.is_temperature_mode) {
+            // In Y16 mode, data is already temperature data
+            uint16_t* thermal_source = (uint16_t*)raw_data;
+            memcpy(temp_data, thermal_source, thermal_width * thermal_height * sizeof(uint16_t));
+        } else {
+            // In YUY2 mode, convert grayscale data to pseudo-temperature
+            for (int i = 0; i < thermal_width * thermal_height; i++) {
+                // Extract Y component from YUY2 and convert to pseudo temperature
+                uint8_t y_value = raw_data[i * 2];
+                temp_data[i] = (uint16_t)(y_value * 64 + 17000); // Pseudo conversion
+            }
+        }
+        
+        // Create visualization
+        bool display_available = true;
+        
+        try {
+            // Simple grayscale conversion for reliability
+            for (int i = 0; i < thermal_width * thermal_height; i++) {
+                uint8_t gray;
+                if (g_config.is_temperature_mode) {
+                    // Convert temperature data to grayscale
+                    float temp_c = ((float)temp_data[i] / 64.0f) - 273.15f;
+                    // Map temperature range roughly 15-40°C to 0-255
+                    int mapped = (int)((temp_c - 15.0f) * 255.0f / 25.0f);
+                    gray = (uint8_t)std::max(0, std::min(255, mapped));
+                } else {
+                    // Use Y component directly
+                    gray = raw_data[i * 2];
+                }
+                
+                rgb_display[i * 3 + 0] = gray; // B
+                rgb_display[i * 3 + 1] = gray; // G  
+                rgb_display[i * 3 + 2] = gray; // R
+            }
+            
+            // Create display image
+            cv::Mat thermal_img(thermal_height, thermal_width, CV_8UC3, rgb_display);
+            cv::Mat display_img;
+            cv::resize(thermal_img, display_img, 
+                      cv::Size(thermal_width * g_config.display_scale, 
+                              thermal_height * g_config.display_scale), 
+                      0, 0, cv::INTER_NEAREST);
+            
+            // Draw crosshair
+            if (g_config.show_crosshair) {
+                int display_x = g_selected_point.x * g_config.display_scale;
+                int display_y = g_selected_point.y * g_config.display_scale;
+                cv::drawMarker(display_img, cv::Point(display_x, display_y), 
+                              cv::Scalar(0, 255, 255), cv::MARKER_CROSS, 20, 2);
+            }
+            
+            // Calculate statistics periodically
+            if (frame_count % 30 == 0 && g_config.is_temperature_mode) {
+                current_stats = calculate_frame_stats_safe(temp_data, thermal_width, thermal_height);
+            }
+            
+            // Add overlay text
+            std::vector<std::string> overlay_text;
+            
+            std::string mode_str = g_config.is_temperature_mode ? "Temperature (Y16)" : "RGB (YUY2)";
+            overlay_text.push_back("Mode: " + mode_str);
+            overlay_text.push_back("Frames: " + std::to_string(successful_frames) + "/" + std::to_string(frame_count) + 
+                                  " | FPS: " + std::to_string((int)current_fps));
+            
+            // Selected point temperature
+            if (g_config.is_temperature_mode) {
+                float point_temp = get_point_temperature_safe(temp_data, 
+                    g_selected_point.x, g_selected_point.y, thermal_width, thermal_height);
+                
+                if (point_temp > -900) {
+                    std::stringstream ss;
+                    ss << "Point (" << g_selected_point.x << "," << g_selected_point.y << "): "
+                       << std::fixed << std::setprecision(1) << convert_to_display_unit(point_temp) 
+                       << get_unit_symbol();
+                    overlay_text.push_back(ss.str());
+                }
+                
+                // Frame statistics
+                if (g_config.show_stats && current_stats.valid) {
+                    std::stringstream ss;
+                    ss << "Min: " << std::fixed << std::setprecision(1) 
+                       << convert_to_display_unit(current_stats.min_temp_c) << get_unit_symbol();
+                    overlay_text.push_back(ss.str());
+                    
+                    ss.str("");
+                    ss << "Max: " << std::fixed << std::setprecision(1) 
+                       << convert_to_display_unit(current_stats.max_temp_c) << get_unit_symbol();
+                    overlay_text.push_back(ss.str());
+                }
+            }
+            
+            // Draw overlay text
+            int y_offset = 25;
+            for (const auto& text : overlay_text) {
+                cv::putText(display_img, text, cv::Point(10, y_offset), 
+                           cv::FONT_HERSHEY_SIMPLEX, 0.6, cv::Scalar(0, 255, 0), 2);
+                y_offset += 25;
+            }
+            
+            // Display image
+            cv::imshow("P2 Thermal Camera - Diagnostic", display_img);
+        } catch (const cv::Exception& e) {
+            if (display_available) {
+                WARNING_PRINT("Display error: " << e.what());
+                display_available = false;
+            }
+        }
+        
+        // Update FPS counter
+        auto current_time = std::chrono::steady_clock::now();
+        auto fps_elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(current_time - last_fps_time);
+        if (fps_elapsed.count() >= 1000) {
+            current_fps = fps_counter * 1000.0f / fps_elapsed.count();
+            fps_counter = 0;
+            last_fps_time = current_time;
+            
+            // Console status update
+            auto total_elapsed = std::chrono::duration_cast<std::chrono::seconds>(current_time - start_time);
+            std::cout << "\r📊 " << successful_frames << "/" << frame_count << " frames | " 
+                     << total_elapsed.count() << "s | "
+                     << std::fixed << std::setprecision(1) << current_fps << " fps | "
+                     << (g_config.is_temperature_mode ? "Y16" : "YUY2") << " mode"
+                     << "        " << std::flush;
+        }
+        
+        // Handle keyboard input
+        int key = cv::waitKey(1) & 0xFF;
+        
+        switch (key) {
+            case 'q':
+            case 27:  // ESC
+                DEBUG_PRINT("User requested exit");
+                g_running = false;
+                is_streaming = 0;
+                break;
+                
+            case 't':
+                if (g_config.is_temperature_mode) {
+                    y16_preview_stop(PREVIEW_PATH0);
+                    g_config.is_temperature_mode = false;
+                    DEBUG_PRINT("Switched to RGB mode");
+                } else {
+                    if (switch_to_temperature_mode_safe()) {
+                        DEBUG_PRINT("Successfully switched to temperature mode");
+                    }
+                }
+                break;
+                
+            case 'c':
+                g_config.show_crosshair = !g_config.show_crosshair;
+                break;
+                
+            case 's':
+                g_config.show_stats = !g_config.show_stats;
+                break;
+                
+            case 'u':
+                g_display_unit = (TemperatureUnit)((g_display_unit + 1) % 3);
+                DEBUG_PRINT("Changed temperature unit to " << get_unit_symbol());
+                break;
+                
+            case 'h':
+                std::cout << "\n📋 CONTROLS:" << std::endl;
+                std::cout << "  'q' or ESC - Quit" << std::endl;
+                std::cout << "  't' - Toggle temperature/RGB mode" << std::endl;
+                std::cout << "  'c' - Toggle crosshair" << std::endl;
+                std::cout << "  's' - Toggle statistics" << std::endl;
+                std::cout << "  'u' - Cycle temperature units" << std::endl;
+                std::cout << "  'h' - Show this help" << std::endl;
+                break;
+        }
+    }
+    
+    // Cleanup
+    DEBUG_PRINT("Starting cleanup...");
+    
+    auto total_time = std::chrono::steady_clock::now() - start_time;
+    auto total_seconds = std::chrono::duration_cast<std::chrono::seconds>(total_time).count();
+    
+    is_streaming = 0;
+    
+    // Stop Y16 mode if active
+    if (g_config.is_temperature_mode) {
+        y16_preview_stop(PREVIEW_PATH0);
+    }
+    
+    // Cleanup in reverse order
+    delete[] temp_data;
+    delete[] rgb_display;
+    
+    try {
+        cv::destroyAllWindows();
+    } catch (...) {
+        DEBUG_PRINT("Error destroying OpenCV windows");
+    }
+    
+    uvc_camera_stream_close(KEEP_CAM_SIDE_PREVIEW);
+    uvc_frame_buf_release(frame_buffer);
+    uvc_camera_close();
+    
+    // Add delay before final release to avoid USB issues
+    usleep(500000); // 500ms
+    uvc_camera_release();
+    
+    // Final statistics
+    std::cout << "\n\n📊 SESSION SUMMARY" << std::endl;
+    std::cout << "=================" << std::endl;
+    std::cout << "Total frames attempted: " << frame_count << std::endl;
+    std::cout << "Successful frames: " << successful_frames << std::endl;
+    std::cout << "Success rate: " << std::fixed << std::setprecision(1) 
+              << (frame_count > 0 ? (successful_frames * 100.0f / frame_count) : 0) << "%" << std::endl;
+    std::cout << "Total time: " << total_seconds << " seconds" << std::endl;
+    if (total_seconds > 0) {
+        std::cout << "Average FPS: " << std::fixed << std::setprecision(1) 
+                  << (successful_frames / (float)total_seconds) << std::endl;
+    }
+    std::cout << "Final mode: " << (g_config.is_temperature_mode ? "Y16 Temperature" : "YUY2 RGB") << std::endl;
+    
+    DEBUG_PRINT("Cleanup completed successfully");
+    std::cout << "\n✅ Application ended cleanly" << std::endl;
+    
+    return 0;
+}
