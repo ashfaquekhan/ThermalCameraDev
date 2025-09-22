@@ -404,19 +404,10 @@ int main(int argc, char* argv[]) {
                 gray = raw_data[i * 2];
             }
             
-            // Apply colormap
-            uint8_t r, g, b;
-            if (gray < 85) {
-                r = gray * 3; g = 0; b = 0;
-            } else if (gray < 170) {
-                r = 255; g = (gray - 85) * 3; b = 0;
-            } else {
-                r = 255; g = 255; b = (gray - 170) * 3;
-            }
-            
-            rgb_display[i * 3] = b;
-            rgb_display[i * 3 + 1] = g;
-            rgb_display[i * 3 + 2] = r;
+            // Set grayscale values (B=G=R)
+            rgb_display[i * 3] = gray;     // B
+            rgb_display[i * 3 + 1] = gray; // G 
+            rgb_display[i * 3 + 2] = gray; // R
         }
         
         // Create display
