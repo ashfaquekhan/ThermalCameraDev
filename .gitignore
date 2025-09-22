@@ -1,0 +1,30 @@
+# User directories
+Desktop/
+Documents/
+Downloads/
+Music/
+Pictures/
+Public/
+Templates/
+Videos/
+Bookshelf/
+
+# Configuration and cache
+.config/
+.cache/
+.local/
+.vscode-server/
+.dotnet/
+
+# System and shell files
+.Xauthority
+.xsession-errors
+.xsession-errors.old
+.wget-hsts
+.sudo_as_admin_successful
+
+# Shell history and config
+.bash_history
+.bashrc
+.bash_logout
+.profile
