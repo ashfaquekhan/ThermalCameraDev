@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <numeric>
 #include <cmath>
+#include <fstream>
 
 // Define DLLEXPORT for Linux
 #ifndef DLLEXPORT
@@ -149,20 +150,21 @@ FrameStats calculate_frame_stats(uint16_t* temp_data, int width, int height) {
     return stats;
 }
 
-// Initialize calibration
-bool load_calibration_files() {
-    // Check if calibration files exist
+// Check calibration files
+bool check_calibration_files() {
     bool has_tau_l = (access("tau_L.bin", F_OK) == 0);
     bool has_tau_h = (access("tau_H.bin", F_OK) == 0);
     
-    if (!has_tau_l || !has_tau_h) {
-        std::cout << "Warning: Calibration files not found (tau_L.bin, tau_H.bin)" << std::endl;
+    if (has_tau_l && has_tau_h) {
+        std::cout << "Found calibration files (tau_L.bin, tau_H.bin)" << std::endl;
+        return true;
+    } else {
+        std::cout << "Warning: Calibration files not found" << std::endl;
+        if (!has_tau_l) std::cout << "  Missing: tau_L.bin" << std::endl;
+        if (!has_tau_h) std::cout << "  Missing: tau_H.bin" << std::endl;
         std::cout << "Temperature readings may be inaccurate" << std::endl;
         return false;
     }
-    
-    std::cout << "Found calibration files" << std::endl;
-    return true;
 }
 
 // Configure camera parameters
@@ -172,7 +174,7 @@ bool configure_camera() {
     // Wait for stabilization
     usleep(500000);
     
-    // Set gain mode (0=low, 1=high)
+    // Try to set gain mode
     int result = set_prop_tpd_params(TPD_PROP_GAIN_SEL, 1);
     if (result != 0) {
         std::cout << "Warning: Failed to set gain mode: " << result << std::endl;
@@ -180,14 +182,14 @@ bool configure_camera() {
     
     usleep(100000);
     
-    // Set emissivity (0.95)
+    // Set emissivity
     uint16_t emissivity = (uint16_t)(0.95 * 16384);
     result = set_prop_tpd_params(TPD_PROP_EMS, emissivity);
     if (result != 0) {
         std::cout << "Warning: Failed to set emissivity: " << result << std::endl;
     }
     
-    // Set ambient temperature (25C)
+    // Set ambient temperature
     uint16_t ambient = (uint16_t)((25.0 + 273.15) * 16);
     result = set_prop_tpd_params(TPD_PROP_TA, ambient);
     if (result != 0) {
@@ -224,8 +226,8 @@ int main(int argc, char* argv[]) {
     std::cout << "P2 Thermal Camera" << std::endl;
     std::cout << "==================" << std::endl;
     
-    // Load calibration files
-    load_calibration_files();
+    // Check calibration files
+    check_calibration_files();
     
     // Initialize command system
     if (vdcmd_init() == 0) {
