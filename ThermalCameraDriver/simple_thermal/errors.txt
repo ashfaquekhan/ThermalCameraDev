@@ -1,6 +1,24 @@
-P2 Thermal Camera
-==================
+i@aak:~/ThermalCameraDev/ThermalCameraDriver/simple_thermal $ sudo ./simple_thermal 
+P2 Thermal Camera - Raspberry Pi 3B+
+=====================================
+Found calibration files (tau_L.bin, tau_H.bin)
 Command system initialized
-Initializing temperature processing...
-Loaded calibration files: tau_L (7168 bytes), tau_H (7168 bytes)
-Segmentation fault
+Device 0: VID=0xbda, PID=0x5840
+Found P2 thermal camera at index 0
+Resolution: 256x192 @ 25 fps
+Camera streaming started
+Configuring camera parameters...
+Warning: Failed to set gain mode: -16
+Warning: Failed to set emissivity: -1
+Warning: Failed to set ambient temperature: -1
+Switching to Y16 temperature mode...
+Successfully switched to Y16 mode
+QStandardPaths: XDG_RUNTIME_DIR not set, defaulting to '/tmp/runtime-root'
+
+Controls:
+  q/ESC - Quit
+  t - Toggle temperature mode
+  c - Toggle crosshair
+  s - Toggle statistics
+  Click to select measurement point
+

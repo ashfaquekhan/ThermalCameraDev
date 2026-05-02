@@ -223,8 +223,8 @@ int main(int argc, char* argv[]) {
     signal(SIGINT, signal_handler);
     signal(SIGTERM, signal_handler);
     
-    std::cout << "P2 Thermal Camera" << std::endl;
-    std::cout << "==================" << std::endl;
+    std::cout << "P2 Thermal Camera - Raspberry Pi 3B+" << std::endl;
+    std::cout << "=====================================" << std::endl;
     
     // Check calibration files
     check_calibration_files();
@@ -404,10 +404,9 @@ int main(int argc, char* argv[]) {
                 gray = raw_data[i * 2];
             }
             
-            // Set grayscale values (B=G=R)
-            rgb_display[i * 3] = gray;     // B
-            rgb_display[i * 3 + 1] = gray; // G 
-            rgb_display[i * 3 + 2] = gray; // R
+            rgb_display[i * 3] = gray;
+            rgb_display[i * 3 + 1] = gray;
+            rgb_display[i * 3 + 2] = gray;
         }
         
         // Create display
@@ -494,7 +493,7 @@ int main(int argc, char* argv[]) {
         
         switch (key) {
             case 'q':
-            case 27:  // ESC
+            case 27:
                 g_running = false;
                 is_streaming = 0;
                 break;
