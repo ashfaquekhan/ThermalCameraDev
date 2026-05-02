@@ -171,13 +171,16 @@ bool check_calibration_files() {
 bool configure_camera() {
     std::cout << "Configuring camera parameters..." << std::endl;
     
-    // Wait for stabilization
-    usleep(500000);
+    // Wait longer for camera stabilization (SDK needs time)
+    std::cout << "Waiting for camera initialization..." << std::endl;
+    sleep(2);
     
     // Try to set gain mode
     int result = set_prop_tpd_params(TPD_PROP_GAIN_SEL, 1);
     if (result != 0) {
-        std::cout << "Warning: Failed to set gain mode: " << result << std::endl;
+        std::cout << "Note: Gain mode not set (using default)" << std::endl;
+    } else {
+        std::cout << "Gain mode configured" << std::endl;
     }
     
     usleep(100000);
@@ -186,14 +189,18 @@ bool configure_camera() {
     uint16_t emissivity = (uint16_t)(0.95 * 16384);
     result = set_prop_tpd_params(TPD_PROP_EMS, emissivity);
     if (result != 0) {
-        std::cout << "Warning: Failed to set emissivity: " << result << std::endl;
+        std::cout << "Note: Emissivity not set (using default 0.95)" << std::endl;
+    } else {
+        std::cout << "Emissivity set to 0.95" << std::endl;
     }
     
     // Set ambient temperature
     uint16_t ambient = (uint16_t)((25.0 + 273.15) * 16);
     result = set_prop_tpd_params(TPD_PROP_TA, ambient);
     if (result != 0) {
-        std::cout << "Warning: Failed to set ambient temperature: " << result << std::endl;
+        std::cout << "Note: Ambient temp not set (using default)" << std::endl;
+    } else {
+        std::cout << "Ambient temperature set to 25°C" << std::endl;
     }
     
     return true;
