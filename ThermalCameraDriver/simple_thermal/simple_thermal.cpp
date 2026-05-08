@@ -40,6 +40,8 @@ struct ThermalConfig {
     int display_scale = 2;
     float temp_offset_celsius = 0.0f;
     bool is_temperature_mode = false;
+    bool use_pseudocolor = true;
+    int color_mode = 3;  // IRPROC_COLOR_MODE_3 (default rainbow)
 };
 
 struct FrameStats {
@@ -48,6 +50,22 @@ struct FrameStats {
     float avg_temp_c = -999.0f;
     float center_temp_c = -999.0f;
     bool valid = false;
+};
+
+// Color mode names for display
+const char* color_mode_names[] = {
+    "None",
+    "White Hot",        // MODE_1
+    "Reserved",         // MODE_2
+    "Rainbow",          // MODE_3
+    "Color 4",          // MODE_4
+    "Color 5",          // MODE_5
+    "Iron/Fire",        // MODE_6
+    "Color 7",          // MODE_7
+    "Color 8",          // MODE_8
+    "Color 9",          // MODE_9
+    "Color 10",         // MODE_10
+    "Black Hot"         // MODE_11
 };
 
 // Global state
@@ -226,12 +244,52 @@ bool switch_to_temperature_mode() {
     }
 }
 
+// Apply pseudocolor to thermal data
+void apply_pseudocolor(uint16_t* temp_data, int width, int height, 
+                      int color_mode, uint8_t* rgb_output) {
+    int pixel_count = width * height;
+    
+    // Allocate YUV422 buffer for SDK pseudocolor function
+    uint8_t* yuv_buffer = new uint8_t[pixel_count * 2];
+    
+    // Apply SDK pseudocolor mapping (Y14 to YUV422)
+    y14_map_to_yuyv_pseudocolor(temp_data, pixel_count, 
+                                 (irproc_color_mode_t)color_mode, yuv_buffer);
+    
+    // Convert YUV422 to RGB
+    for (int i = 0; i < pixel_count; i++) {
+        // YUV422 is packed as: Y0 U Y1 V (4 bytes for 2 pixels)
+        int pair_idx = i / 2;
+        int is_second = i % 2;
+        
+        uint8_t y = yuv_buffer[i * 2];
+        uint8_t u = yuv_buffer[pair_idx * 4 + 1];
+        uint8_t v = yuv_buffer[pair_idx * 4 + 3];
+        
+        // YUV to RGB conversion (ITU-R BT.601)
+        int c = y - 16;
+        int d = u - 128;
+        int e = v - 128;
+        
+        int r = (298 * c + 409 * e + 128) >> 8;
+        int g = (298 * c - 100 * d - 208 * e + 128) >> 8;
+        int b = (298 * c + 516 * d + 128) >> 8;
+        
+        // Clamp to valid range
+        rgb_output[i * 3]     = std::max(0, std::min(255, b));  // B
+        rgb_output[i * 3 + 1] = std::max(0, std::min(255, g));  // G
+        rgb_output[i * 3 + 2] = std::max(0, std::min(255, r));  // R
+    }
+    
+    delete[] yuv_buffer;
+}
+
 int main(int argc, char* argv[]) {
     signal(SIGINT, signal_handler);
     signal(SIGTERM, signal_handler);
     
-    std::cout << "P2 Thermal Camera - Raspberry Pi 3B+" << std::endl;
-    std::cout << "=====================================" << std::endl;
+    std::cout << "P2 Thermal Camera with Pseudocolor Support" << std::endl;
+    std::cout << "===========================================" << std::endl;
     
     // Check calibration files
     check_calibration_files();
@@ -365,12 +423,16 @@ int main(int argc, char* argv[]) {
     float current_fps = 0;
     FrameStats current_stats;
     
-    std::cout << "\nControls:" << std::endl;
-    std::cout << "  q/ESC - Quit" << std::endl;
-    std::cout << "  t - Toggle temperature mode" << std::endl;
-    std::cout << "  c - Toggle crosshair" << std::endl;
-    std::cout << "  s - Toggle statistics" << std::endl;
-    std::cout << "  Click to select measurement point" << std::endl;
+    std::cout << "\n=== CONTROLS ===" << std::endl;
+    std::cout << "  q/ESC     - Quit" << std::endl;
+    std::cout << "  t         - Toggle temperature mode (YUY2/Y16)" << std::endl;
+    std::cout << "  p         - Toggle pseudocolor ON/OFF" << std::endl;
+    std::cout << "  [ ]       - Previous/Next color palette" << std::endl;
+    std::cout << "  1-9       - Quick select color mode" << std::endl;
+    std::cout << "  c         - Toggle crosshair" << std::endl;
+    std::cout << "  s         - Toggle statistics" << std::endl;
+    std::cout << "  Mouse     - Click to select measurement point" << std::endl;
+    std::cout << "\nCurrent: " << color_mode_names[g_config.color_mode] << std::endl;
     std::cout << std::endl;
     
     // Main loop
@@ -392,28 +454,34 @@ int main(int argc, char* argv[]) {
             // Y16 mode - temperature data
             uint16_t* thermal_source = (uint16_t*)raw_data;
             memcpy(temp_data, thermal_source, thermal_width * thermal_height * sizeof(uint16_t));
+            
+            // Apply visualization
+            if (g_config.use_pseudocolor) {
+                // SDK pseudocolor mapping
+                apply_pseudocolor(temp_data, thermal_width, thermal_height,
+                                g_config.color_mode, rgb_display);
+            } else {
+                // Grayscale visualization
+                for (int i = 0; i < thermal_width * thermal_height; i++) {
+                    float temp_c = (temp_data[i] / 64.0f) - 273.15f;
+                    int mapped = (int)((temp_c - 15.0f) * 255.0f / 25.0f);
+                    uint8_t gray = (uint8_t)std::max(0, std::min(255, mapped));
+                    
+                    rgb_display[i * 3] = gray;
+                    rgb_display[i * 3 + 1] = gray;
+                    rgb_display[i * 3 + 2] = gray;
+                }
+            }
         } else {
             // YUY2 mode - convert grayscale
             for (int i = 0; i < thermal_width * thermal_height; i++) {
                 uint8_t y_value = raw_data[i * 2];
                 temp_data[i] = (uint16_t)(y_value * 64 + 17000);
+                
+                rgb_display[i * 3] = y_value;
+                rgb_display[i * 3 + 1] = y_value;
+                rgb_display[i * 3 + 2] = y_value;
             }
-        }
-        
-        // Create visualization
-        for (int i = 0; i < thermal_width * thermal_height; i++) {
-            uint8_t gray;
-            if (g_config.is_temperature_mode) {
-                float temp_c = (temp_data[i] / 64.0f) - 273.15f;
-                int mapped = (int)((temp_c - 15.0f) * 255.0f / 25.0f);
-                gray = (uint8_t)std::max(0, std::min(255, mapped));
-            } else {
-                gray = raw_data[i * 2];
-            }
-            
-            rgb_display[i * 3] = gray;
-            rgb_display[i * 3 + 1] = gray;
-            rgb_display[i * 3 + 2] = gray;
         }
         
         // Create display
@@ -444,6 +512,14 @@ int main(int argc, char* argv[]) {
         overlay_text.push_back("FPS: " + std::to_string((int)current_fps));
         
         if (g_config.is_temperature_mode) {
+            // Color mode info
+            if (g_config.use_pseudocolor) {
+                overlay_text.push_back("Color: " + std::string(color_mode_names[g_config.color_mode]));
+            } else {
+                overlay_text.push_back("Color: Grayscale");
+            }
+            
+            // Point temperature
             float point_temp = get_point_temperature(temp_data,
                 g_selected_point.x, g_selected_point.y, thermal_width, thermal_height);
             
@@ -453,6 +529,7 @@ int main(int argc, char* argv[]) {
                 overlay_text.push_back(ss.str());
             }
             
+            // Statistics
             if (g_config.show_stats && current_stats.valid) {
                 std::stringstream ss;
                 ss << "Min: " << std::fixed << std::setprecision(1) << current_stats.min_temp_c << "C";
@@ -492,6 +569,7 @@ int main(int argc, char* argv[]) {
                      << " | Time: " << total_elapsed.count() << "s"
                      << " | FPS: " << std::fixed << std::setprecision(1) << current_fps
                      << " | Mode: " << (g_config.is_temperature_mode ? "Y16" : "YUY2")
+                     << " | Color: " << (g_config.use_pseudocolor ? color_mode_names[g_config.color_mode] : "Grayscale")
                      << "        " << std::flush;
         }
         
@@ -500,7 +578,7 @@ int main(int argc, char* argv[]) {
         
         switch (key) {
             case 'q':
-            case 27:
+            case 27:  // ESC
                 g_running = false;
                 is_streaming = 0;
                 break;
@@ -509,12 +587,72 @@ int main(int argc, char* argv[]) {
                 if (g_config.is_temperature_mode) {
                     y16_preview_stop(PREVIEW_PATH0);
                     g_config.is_temperature_mode = false;
-                    std::cout << "\nSwitched to RGB mode" << std::endl;
+                    std::cout << "\nSwitched to YUY2 mode" << std::endl;
                 } else {
                     if (switch_to_temperature_mode()) {
-                        std::cout << "\nSwitched to temperature mode" << std::endl;
+                        std::cout << "\nSwitched to Y16 temperature mode" << std::endl;
                     }
                 }
+                break;
+                
+            case 'p':
+                g_config.use_pseudocolor = !g_config.use_pseudocolor;
+                std::cout << "\nPseudocolor: " 
+                         << (g_config.use_pseudocolor ? "ON" : "OFF") << std::endl;
+                if (g_config.use_pseudocolor) {
+                    std::cout << "Current palette: " 
+                             << color_mode_names[g_config.color_mode] << std::endl;
+                }
+                break;
+                
+            case '[':  // Previous palette
+                if (g_config.color_mode > 1) {
+                    g_config.color_mode--;
+                    if (g_config.color_mode == 2) g_config.color_mode = 1;  // Skip reserved
+                } else {
+                    g_config.color_mode = 11;
+                }
+                std::cout << "\nColor mode: " << color_mode_names[g_config.color_mode] << std::endl;
+                break;
+                
+            case ']':  // Next palette
+                if (g_config.color_mode < 11) {
+                    g_config.color_mode++;
+                    if (g_config.color_mode == 2) g_config.color_mode = 3;  // Skip reserved
+                } else {
+                    g_config.color_mode = 1;
+                }
+                std::cout << "\nColor mode: " << color_mode_names[g_config.color_mode] << std::endl;
+                break;
+                
+            case '1':
+                g_config.color_mode = 1;  // White Hot
+                g_config.use_pseudocolor = true;
+                std::cout << "\nColor: " << color_mode_names[1] << std::endl;
+                break;
+                
+            case '3':
+                g_config.color_mode = 3;  // Rainbow
+                g_config.use_pseudocolor = true;
+                std::cout << "\nColor: " << color_mode_names[3] << std::endl;
+                break;
+                
+            case '6':
+                g_config.color_mode = 6;  // Iron/Fire
+                g_config.use_pseudocolor = true;
+                std::cout << "\nColor: " << color_mode_names[6] << std::endl;
+                break;
+                
+            case '9':
+                g_config.color_mode = 9;  // Color 9
+                g_config.use_pseudocolor = true;
+                std::cout << "\nColor: " << color_mode_names[9] << std::endl;
+                break;
+                
+            case '0':
+                g_config.color_mode = 11;  // Black Hot
+                g_config.use_pseudocolor = true;
+                std::cout << "\nColor: " << color_mode_names[11] << std::endl;
                 break;
                 
             case 'c':
