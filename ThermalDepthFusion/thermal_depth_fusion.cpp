@@ -295,10 +295,14 @@ int main(){
     set_prop_image_params(IMAGE_PROP_LEVEL_TNR,2);
     set_prop_image_params(IMAGE_PROP_LEVEL_BRIGHTNESS,140);
     set_prop_image_params(IMAGE_PROP_LEVEL_CONTRAST,150);
-    // NOTE: the Y16 image path is started LATER, right before the read loop, so the
-    // thermal stream isn't left un-serviced during the slow Arducam init (that gap
-    // stalls the stream and makes uvc_frame_get fail).
-    std::cout<<"+ thermal "<<TW<<"x"<<TH<<" @ "<<cp.fps<<" fps\n";
+    // The camera's periodic auto-shutter/FFC (~10s) is what kills the default image
+    // stream (uvc_frame_get -> ret=-12). Disable it, and take ONE manual FFC now for
+    // a clean baseline. This keeps the reliable YUY2 image stream alive indefinitely
+    // without any Y16/temperature mode.
+    set_prop_auto_shutter_params(SHUTTER_PROP_SWITCH, 0);
+    ooc_b_update(OOC_B_UPDATE);
+    usleep(300000);
+    std::cout<<"+ thermal "<<TW<<"x"<<TH<<" @ "<<cp.fps<<" fps (auto-shutter OFF)\n";
 
     // Arducam ToF (depth + amplitude/confidence camera).
     // The unicam capture node (/dev/videoN) can renumber across reboots, so find
@@ -350,10 +354,10 @@ int main(){
     // the mode ThermalViewer runs stably). Rendered purely as a normalized image,
     // no temperatures shown. (Clean start is guaranteed: `make run` kills stale
     // instances + resets the cam first.)
-    sleep(2);
-    bool y16=engage_y16(fbuf);
-    printf(y16?"+ Y16 stable image mode (no temps shown)\n":"! Y16 did NOT engage - YUY2 fallback (may die ~10s)\n");
-    fflush(stdout);
+    // Default YUY2 image stream: reliable to start, decodes via raw[i*2], and with
+    // auto-shutter disabled above it does NOT die at ~10s. No temperature mode.
+    bool y16=false;
+    printf("+ thermal image ready (YUY2 luma, auto-shutter off, no temps)\n"); fflush(stdout);
 
     // Silence ONLY the SDK's [WARN] flood (stderr); keep stdout for the heartbeat
     // so we can see which side stalls if it freezes.
@@ -372,9 +376,9 @@ int main(){
         }
         int r=uvc_frame_get(fbuf); last_ret=r;
         if(r!=0){ uvc_fail++;
-            // thermal stream died (ret=-12 at the auto-shutter): try to re-engage Y16
-            if(++consec_fail>=4){ printf("! thermal stalled (ret=%d) - re-engaging Y16...\n",r); fflush(stdout);
-                if(engage_y16(fbuf)) y16=true; consec_fail=0; }
+            // shouldn't happen now (auto-shutter off); if it does, reassert shutter-off
+            if(++consec_fail>=8){ printf("! thermal stalled (ret=%d) - reasserting shutter off...\n",r); fflush(stdout);
+                set_prop_auto_shutter_params(SHUTTER_PROP_SWITCH,0); consec_fail=0; }
             usleep(8000); continue;
         }
         consec_fail=0;
